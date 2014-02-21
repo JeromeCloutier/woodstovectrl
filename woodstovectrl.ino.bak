@@ -1,0 +1,426 @@
+/********************************************************
+ *Wood Stove Controller, Jerome Cloutier 2014
+ ********************************************************/
+#include <PID_v1.h>
+#include <Keypad_I2C.h>
+#include <Keypad.h>
+#include <LiquidCrystal_I2C.h>
+#include <Wire.h>
+#include <MAX31855.h>
+#include <EEPROMex.h>
+#define I2CADDR 0x21 //keypad address
+LiquidCrystal_I2C lcd(0x20,16,2);  // set the LCD address to 0x20 for a 16 chars and 2 line display
+
+long serialtimerB = 0;
+long printserdelay = 1500;   //Update serial Delay
+long pidtimerB = 0;
+long lcdtimerB = 0;
+long lcdtimer = 700; //Update LCD Delay
+
+
+// Air Injector fan + PID control
+int airinjecttmp = 0;  	 // stove tempreature reading
+int stvsurtmp = A0; 	// surface temp reading for PID
+byte airinject = 10; 		//PWM output for airinjection fan
+byte pidtoggle;
+
+// HVAC Blower one
+byte hvacfan1 = 8;		 //stove fan output Triac Out
+int hvacsens1 = A1;		 //stove fan sensor
+int hvac1tmp;
+int hvac1sp;
+byte hvac1run;			// hvac switch 1/0
+// HVAC Blower two
+byte hvacfan2 = 7;	 // blower output pin to triac
+int hvacsens2 = A2;	 //blower sensor pin
+int hvac2tmp;			 // blower var init
+int hvac2sp; 			//blower setpoint
+byte hvac2run;		// hvac switch 1/0
+
+int awaysp;  int lowsp; int medsp; int hisp; //SetPoint variables
+int awayaddr = 1; int lowaddr = 3; int medaddr = 5; int hiaddr = 7; int mstvaddr = 9;
+ int hvac2addr = 11; int spstvaddr = 13;int setpidaddr = 15; int hvac1addr = 17; 
+ byte hvac1runaddr = 21; byte  hvac2runaddr =22;  // eeprom addresses 
+byte pidMode;
+double  ThermF = 0;
+
+byte thermoCLK = 3;  //thermocouple pins
+byte thermoCS = 4;
+byte thermoDO = 5;
+
+// Initialize the Thermocouple
+MAX31855 thermocouple(thermoCLK, thermoCS, thermoDO);
+
+
+byte subF1[8] = {
+B11110,
+B10000,
+B11100,
+B10010,
+B10110,
+B10010,
+B00010,
+B00111
+};
+byte setPoinT[8] = {
+B11100,
+B10000,
+B11100,
+B00111,
+B11101,
+B00111,
+B00100,
+B00101
+};
+byte subF2[8] = {
+B11110,
+B10000,
+B11100,
+B10111,
+B10001,
+B10111,
+B00100,
+B00111
+};
+
+
+
+const byte ROWS = 4; //4 rows
+const byte COLS = 4; //4 columns
+char keys[ROWS][COLS] = {
+	{'1','2','3','A'},
+	{'4','5','6','B'},
+	{'7','8','9','C'},
+	{'*','0','#','D'}
+										};
+//keypad, bit numbers of PCF8574 i/o port
+byte rowPins[ROWS] = {0, 1, 2, 3}; //connect to the row pinouts of the keypad
+byte colPins[COLS] = {4, 5, 6, 7};
+Keypad_I2C keypad = Keypad_I2C( makeKeymap(keys), rowPins, colPins, ROWS, COLS, I2CADDR );
+
+double Setpoint, Input, Output;
+PID myPID(&Input, &Output, &Setpoint,2,5,1, DIRECT);
+//Specify the links and initial tuning parameters
+
+void setup(){
+	EEPROM.setMaxAllowedWrites(10);	
+		lcd.init();
+		lcd.backlight();
+		keypad.begin(); //turn on the keypad
+		myPID.SetMode(AUTOMATIC); //turn the PID on
+		keypad.addEventListener(keypadEvent); //add an event listener for this keypad
+	
+	lcd.begin(16,2);
+	lcd.setCursor(0,0);
+	lcd.print(F("AutoTherm"));lcd.write(0xF4);
+	lcd.setCursor(0,1);
+	lcd.print(F("Cloutier2K 2014"));
+	delay(2000);
+	lcd.clear();
+	
+	lcd.createChar(0,  subF1);
+	lcd.createChar(1,  setPoinT);
+	lcd.createChar(2,  subF2);
+readmem();
+Serial.begin(9600);
+}
+void readmem(){
+	
+awaysp = (EEPROM.readInt(awayaddr));
+lowsp = (EEPROM.readInt(lowaddr));  
+medsp = (EEPROM.readInt(medaddr));  
+hisp = (EEPROM.readInt(hiaddr));   
+pidtoggle = (EEPROM.readInt(setpidaddr)); 
+hvac1sp = (EEPROM.readInt(hvac1addr)); 
+hvac2sp = (EEPROM.readInt(hvac2addr));
+hvac1run = (EEPROM.readByte(hvac1runaddr)); 
+hvac2run = (EEPROM.readByte(hvac2runaddr));
+}
+
+void printser(){     //Print This stuff to the serial
+unsigned long serialtimerA = millis();
+	if(serialtimerA - serialtimerB > printserdelay) {
+		// save the last time updated 
+		serialtimerB = serialtimerA;  
+	Serial.print(F("Current Temp--> ")); Serial.println(Input);
+	Serial.print(F("output value--> "));Serial.println(Output);
+	//Serial.print("Manual PWM--> ");Serial.println(myvar);
+//	Serial.print(F("Stove SetPoint: "));Serial.println(spstove);
+	Serial.print(F("Hvac #2 SetPoint: "));Serial.println(hvac2sp);
+	Serial.print(F("Free Ram")); Serial.println(freeRam());
+  Serial.print(F("AWAY EEPRM")); Serial.println(EEPROM.readInt(awayaddr));
+ Serial.print(F("LOW EEPRM")); Serial.println(EEPROM.readInt(lowaddr));
+ Serial.print(F("MED EEPRM")); Serial.println(EEPROM.readInt(medaddr));
+ Serial.print(F("HI EEPRM")); Serial.println(EEPROM.readInt(hiaddr));
+ Serial.print(F("SET POINT")); Serial.println(Setpoint);
+Serial.print(F("PID MODE")); Serial.println(EEPROM.readInt(setpidaddr));
+Serial.print(F("HVAC 1 ON/OFF")); Serial.println(hvac1run);
+Serial.print(F("HVAC 2 ON/OFF")); Serial.println(hvac2run);
+	}
+}
+void pidloop(){			//PID loop
+	airinjecttmp = analogRead(stvsurtmp);  //this is the test analog senseor
+//  stovetemp = ThermF; // This is the Thermocouple reading.
+		float stvtmp = airinjecttmp * (5.0 /1023.0)*100;
+		Input = stvtmp;
+		myPID.Compute();
+		analogWrite(airinject,Output);
+}
+int GetNumber() {		//Get numbers from keypad and return value
+	 int NuM = 0;
+	 char key = keypad.getKey();
+	 while(key != '#')
+	 {
+			switch (key)
+			{
+				 case NO_KEY:
+						break;
+				 case '0': case '1': case '2': case '3': case '4':
+				 case '5': case '6': case '7': case '8': case '9':
+						lcd.setCursor(0,1);
+						lcd.print(key);
+						NuM = NuM * 10 + (key - '0');
+						break;
+				 case '*':
+						NuM = 0;
+						lcd.clear();
+						break;
+			}
+			key = keypad.getKey();
+	 }
+	 return NuM;
+}
+void setmode(){
+	char key = keypad.getKey();
+	while(key != '#'){
+	lcd.setCursor(0,0);
+	lcd.print(F("Select Modes"));
+	lcd.setCursor(0,1);
+	lcd.print(F("1 Thru 6"));
+		switch (key){
+				case '1':
+					lcd.clear();
+					lcd.print(F("SET AWAY"));
+					EEPROM.updateInt(setpidaddr, 1);
+					pidtoggle = 1;
+					delay(1000);
+					lcd.clear();
+					break;
+					case '2':
+					lcd.clear();
+					lcd.print(F("SET LOW"));
+					EEPROM.updateInt(setpidaddr, 2);
+					pidtoggle =2;
+					delay(1000);
+					lcd.clear();
+					break;
+					case '3':
+					lcd.clear();
+					lcd.print(F("SET MED"));
+					EEPROM.updateInt(setpidaddr, 3);
+					pidtoggle =3;
+					delay(1000);
+					lcd.clear();
+					break;
+					case '4':
+					lcd.clear();
+					lcd.print(F("SET HIGH"));
+					EEPROM.updateInt(setpidaddr, 4);
+					pidtoggle=4;
+					delay(1000);
+					lcd.clear();
+					break;
+					case '5':
+					lcd.clear();
+					lcd.print(F("Blower 1 ON/OFF"));
+					lcd.setCursor(1,1);
+					lcd.print(F("Select 1 or 0 #"));
+					hvac1run = GetNumber();
+					lcd.clear();
+					EEPROM.updateByte(hvac1runaddr, hvac1run);
+					break;
+					case '6':
+					lcd.clear();
+					lcd.print(F("Blower 2 ON/OFF"));
+					lcd.setCursor(1,1);
+					lcd.print(F("Select 1 or 0 #"));
+					hvac2run = GetNumber();
+					lcd.clear();
+					EEPROM.updateByte(hvac2runaddr, hvac2run);
+					break;
+	}
+			key = keypad.getKey();
+}	
+	return;
+}
+void setpidmenus(){
+	char key = keypad.getKey();
+	while(key != '#'){
+	lcd.setCursor(0,0);
+	lcd.print(F("Select A Menu"));
+	lcd.setCursor(0,1);
+	lcd.print(F("1 Thru 6"));
+		switch (key){
+				case '1':
+					lcd.clear();
+					lcd.print(F("SetPoint 4 AWAY"));
+					awaysp = GetNumber();
+					lcd.clear();
+					EEPROM.updateInt(awayaddr, awaysp);
+					break;
+					case '2':
+						lcd.clear();
+					lcd.print(F("SetPoint 4 LOW"));
+					lowsp = GetNumber();
+					lcd.clear();
+					EEPROM.updateInt(lowaddr, lowsp);
+					break;
+					case '3':
+						lcd.clear();
+					lcd.print(F("SetPoint 4 MED"));
+					medsp = GetNumber();
+					lcd.clear();
+					EEPROM.updateInt(medaddr, medsp);
+					break;
+					case '4':
+					lcd.clear();
+					lcd.print(F("SetPoint 4 HIGH"));
+					hisp = GetNumber();
+					lcd.clear();
+					EEPROM.updateInt(hiaddr, hisp);
+					break;
+					case '5':
+					lcd.clear();
+					lcd.print(F("HVAC 1 Set Point"));
+					hvac1sp = GetNumber();
+					EEPROM.updateInt(hvac1addr, hvac1sp);
+					lcd.clear();
+					break;
+					case '6':
+					lcd.clear();
+					lcd.print(F("HVAC 2 Set Point"));
+					hvac2sp = GetNumber();
+					EEPROM.updateInt(hvac2addr, hvac2sp);
+					lcd.clear();
+					break;
+					
+		}
+			key = keypad.getKey();
+	}	return;
+}
+void keypadEvent(KeypadEvent keyPress){    //Listen to what key has been pressed
+	switch (keypad.getState())
+	{
+		case PRESSED:
+		//lcd.print(keyPress); //print the keypress
+	 //Serial.println(keyPress);
+		switch (keyPress)
+		{
+		case 'A':
+			lcd.clear();
+			setmode();
+			break;		
+			
+				 // default:
+		case 'D':
+			lcd.clear();
+			setpidmenus();
+			break;			
+		}
+		break;
+	}
+}
+void printlcd(){
+	unsigned long lcdtimerA = millis();
+	if(lcdtimerA - lcdtimerB > lcdtimer) {
+		// save the last time updated 
+		lcdtimerB = lcdtimerA;  
+	int stvread = Input;
+	int setpoint = Setpoint;
+	//int hv2t = hvac2tmp;
+	//lcd.clear();
+	
+	lcd.setCursor(0,0);
+	lcd.print(F("Sv"));lcd.print(stvread, DEC);lcd.write(0xDF);lcd.write(0);lcd.print(hvac1tmp, DEC);
+	lcd.write(0xDF);lcd.write(2);lcd.print(hvac2tmp);lcd.write(0xDF);if(hvac2tmp <100)lcd.print("     ");
+	lcd.setCursor(0,1);
+	lcd.write(1);lcd.print(setpoint, DEC);lcd.write(1);lcd.write(0);lcd.print(hvac1sp,DEC);lcd.write(1);lcd.write(2);lcd.print(hvac2sp, DEC);
+			}
+}
+void readtherm(){
+	 ThermF = thermocouple.readFarenheit();
+	 if (isnan(ThermF)) 
+	{
+		lcd.clear();
+		lcd.setCursor(0, 0);
+		lcd.print("T/C Problem");
+	 	lcd.setCursor(0, 1);
+	 	lcd.print("CHK THERMCOUPLE");
+		myPID.SetMode(MANUAL);
+	analogWrite(airinject,0);
+	}
+			 else 
+	{
+	ThermF  = thermocouple.readFarenheit();
+	}
+}
+void hvac1loop(){
+	if (hvac1run == 1){
+int hvac1raw = analogRead(hvacsens1);
+hvac1tmp = hvac1raw * (5.0 /1023.0)*100;
+if (hvac1tmp > hvac1sp){
+	digitalWrite(hvacfan1, HIGH);
+} else {
+	digitalWrite(hvacfan1, LOW);
+		}
+	}
+}
+void hvac2loop(){//read hvac#2 and act accordingly
+	if(hvac2run == 1){
+int hvac2raw = analogRead(hvacsens2);
+hvac2tmp = hvac2raw * (5.0 /1023.0)*100;
+if (hvac2tmp > hvac2sp){
+	digitalWrite(hvacfan2, HIGH);
+} else {
+	digitalWrite(hvacfan2, LOW);
+		}
+	}
+}
+int freeRam(){
+	extern int __heap_start, *__brkval; 
+	int v; 
+	return (int) &v - (__brkval == 0 ? (int) &__heap_start : (int) __brkval); 
+}
+void pidset(){
+
+		switch  (pidtoggle){
+			case 1:
+				Setpoint = awaysp;
+				break;
+			case 2:
+				Setpoint = lowsp;
+				break;
+			case 3:
+				Setpoint = medsp;
+				break;
+			case 4:
+				Setpoint = hisp;
+				break;
+								}
+//		}else {
+//			return;
+	//		}
+	}
+
+/*BEGIN MAIN LOOP AND CALL ALL SUBS*/
+void loop()
+{
+char keyPress = keypad.getKey();
+freeRam();
+printlcd();
+pidloop();
+printser();
+pidset();
+hvac1loop();
+hvac2loop();
+}
